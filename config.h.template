@@ -1,0 +1,14 @@
+#pragma once
+
+#define CFG_SSID "SSID"
+#define CFG_PASSWD "PWD"
+#define CFG_MQTT_HOST "192.168.0.6"
+#define CFG_MQTT_PORT 1883
+#define CFG_MQTT_USER "UNAME"
+#define CFG_MQTT_PASSWD "MQTTPWD"
+#define CFG_MQTT_CLIENT_ID "ID"
+#define CFG_MQTT_STATE_TOPIC "/" CFG_MQTT_CLIENT_ID "/state"
+
+// Wunderground configuration, comment out if not used
+#define CFG_WUNDG_STATIONID "STATION"
+#define CFG_WUNDG_PASSWORD "KEY"
