@@ -16,7 +16,7 @@
 #include "LogPrinterBuffer.h"
 #include "SMA.hpp"
 
-#define FIRMWARE_VERSION "1.4"
+#define FIRMWARE_VERSION "1.6"
 
 #ifndef RF_MODULE_FREQUENCY
 #  define RF_MODULE_FREQUENCY 433.92
