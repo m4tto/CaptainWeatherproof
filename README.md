@@ -1,11 +1,11 @@
 # FSK Weather Station Receiver
 
-This is a comprehensive weather station receiver implementation based on the [rtl_433_ESP library](https://github.com/NorthernMan54/rtl_433_ESP), designed to receive and process FSK wireless weather sensor data from Vevor 7-in-1 weather stations using the SX127X transceiver module. With MQTT auto-discovery, it seamlessly integrates with Home Assistant without any manual configuration.
+This is a comprehensive weather station receiver implementation based on the [rtl_433_ESP library](https://github.com/NorthernMan54/rtl_433_ESP), designed to receive and process FSK wireless weather sensor data from Vevor 7-in-1 weather station (YT60234) using the LILYGO® TTGO LoRa32 V2.1_1.6 **868 MHz** (SX127X) transceiver module. With MQTT auto-discovery, it seamlessly integrates with Home Assistant without any manual configuration.
 
 ## Project Overview
 
 This project creates a complete weather data acquisition system that:
-- Receives wireless weather sensor data at 868MHz from Vevor 7-in-1 weather stations
+- Receives wireless weather sensor data at 868MHz from Vevor 7-in-1 weather station (YT60234)
 - Processes FSK-modulated weather station protocol
 - Provides real-time web interface with weather data visualization
 - Publishes data via MQTT for home automation integration
@@ -39,7 +39,7 @@ This project creates a complete weather data acquisition system that:
 - **Moving Averages**: Wind direction smoothing over configurable periods
 - **Data Validation**: Temperature, humidity, and sensor range checking
 - **Overflow Handling**: Automatic counter overflow detection and correction
-- **Message Age Tracking**: Staleness detection with automatic retransmission
+- **Message Age Tracking**: Staleness detection by displaying elapsed time from last received transmission
 
 ### 🖥️ User Interface
 - **Web Dashboard**: Modern responsive interface with live data updates
@@ -51,9 +51,6 @@ This project creates a complete weather data acquisition system that:
 ### 🔧 System Management
 - **OTA Updates**: Wireless firmware updates via web interface
 - **Configuration Management**: Template-based configuration system
-- **Automatic Recovery**: Watchdog functionality with automatic restart
-- **Memory Management**: Optimized for continuous 24/7 operation
-- **Multi-Core Processing**: Dedicated tasks for UI and data processing
 
 ## Building and implementing the sample
 
@@ -83,7 +80,16 @@ This project creates a complete weather data acquisition system that:
      #define CFG_MQTT_USER "mqtt_username"
      #define CFG_MQTT_PASSWD "mqtt_password"
      #define CFG_MQTT_CLIENT_ID "weather_station"
+
+     #define CFG_WUNDG_STATIONID "STATION_ID"   
+     #define CFG_WUNDG_PASSWORD "API_KEY"    
      ```
+
+   **Note**: Comment out these lines (add `//` at the beginning) if you want to disable Weather Underground integration:
+   ```cpp
+   // #define CFG_WUNDG_STATIONID "STATION_ID"    // Disabled Weather Underground
+   // #define CFG_WUNDG_PASSWORD "API_KEY"        // Disabled Weather Underground
+   ```
 
 4. **Select build environment**
    - Use the `esp32_lilygo_868` environment for LilyGo LoRa32 V2.1 board (868MHz)
@@ -91,31 +97,6 @@ This project creates a complete weather data acquisition system that:
 5. **Build and upload**
    - Use PlatformIO: Build → Upload
    - Monitor serial output for debugging
-
-## Configuration Options
-
-### Network Settings
-```cpp
-#define CFG_SSID "YourWiFiNetwork"           // WiFi network name
-#define CFG_PASSWD "YourPassword"            // WiFi password
-#define CFG_MQTT_HOST "192.168.1.100"       // MQTT broker IP
-#define CFG_MQTT_PORT 1883                   // MQTT broker port
-#define CFG_MQTT_USER "username"             // MQTT username
-#define CFG_MQTT_PASSWD "password"           // MQTT password
-#define CFG_MQTT_CLIENT_ID "weather_station" // Unique MQTT client ID
-```
-
-### Weather Service Integration (Optional)
-```cpp
-#define CFG_WUNDG_STATIONID "STATION_ID"    // Weather Underground station ID
-#define CFG_WUNDG_PASSWORD "API_KEY"        // Weather Underground API key
-```
-
-**Note**: Comment out these lines (add `//` at the beginning) if you want to disable Weather Underground integration:
-```cpp
-// #define CFG_WUNDG_STATIONID "STATION_ID"    // Disabled Weather Underground
-// #define CFG_WUNDG_PASSWORD "API_KEY"        // Disabled Weather Underground
-```
 
 ## Hardware Setup
 
@@ -181,6 +162,7 @@ Returns comprehensive JSON weather data:
   "rain_mm_d": 15.7,
   "uv": 6,
   "light_lux": 45000,
+  "light_lux_avg": 45000,
   "rssi": -65,
   "last_rx": 12,
   "current_date": "2025-10-15 14:30:45",
@@ -271,34 +253,6 @@ if (rssi > 0 dBm || rssi < -120 dBm) reject_data();
 if (uv_index < 0 || uv_index > 16) reject_data();
 if (light_lux < 0 || light_lux > 200000) reject_data();
 ```
-
-## Troubleshooting
-
-### Common Issues
-
-#### No Weather Data Received
-1. Check RF module wiring and connections
-2. Verify frequency setting matches your sensors  
-3. Ensure sensors are within range (typically 100m line-of-sight)
-4. Check RSSI threshold settings
-5. Monitor serial output for signal detection
-
-#### WiFi Connection Problems
-1. Verify SSID and password in config.h
-2. Check WiFi signal strength at ESP32 location
-3. Monitor connection status on OLED display
-4. Check for automatic reconnection attempts
-
-#### MQTT Issues
-1. Verify MQTT broker address and credentials
-2. Check network connectivity to broker
-3. Monitor MQTT connection status in web interface
-4. Verify topic permissions and broker settings
-
-### Debug Tools
-- **Serial Monitor**: Detailed logging at 921600 baud
-- **Web Logs**: Real-time log viewing via web interface  
-- **OLED Display**: Local status and error indication
 
 ## Contributing
 
