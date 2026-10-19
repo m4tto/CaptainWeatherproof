@@ -18,7 +18,7 @@
 #include "RainStats.hpp"
 #include "WundergroudSender.h"
 
-#define FIRMWARE_VERSION "1.7"
+#define FIRMWARE_VERSION "1.8"
 
 #define WUNDG_INTERVAL_MS 60000 // min time between Wunderground uploads
 
