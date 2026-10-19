@@ -16,8 +16,11 @@
 #include "LogPrinterBuffer.h"
 #include "SMA.hpp"
 #include "RainStats.hpp"
+#include "WundergroudSender.h"
 
 #define FIRMWARE_VERSION "1.7"
+
+#define WUNDG_INTERVAL_MS 60000 // min time between Wunderground uploads
 
 #ifndef RF_MODULE_FREQUENCY
 #  define RF_MODULE_FREQUENCY 433.92
@@ -419,6 +422,7 @@ void processMessage(JsonDocument &jsondata) {
   jsondata["rain_mm_m"] = rainStats.minuteMm();
   jsondata["rain_mm_h"] = rainStats.hourMm();
   jsondata["rain_mm_d"] = rainStats.dayMm();
+  jsondata["rain_mm_60m"] = rainStats.last60MinMm(time(nullptr));
 
   jsondata["wind_dir_deg_avg"] = sma->get();
 
@@ -446,6 +450,40 @@ void publishLatest(bool resend) {
 
   publishState(mqtt, state_topic, out);
 }
+
+#ifdef CFG_WUNDG_STATIONID
+// Runs in loop(): uploads the latest processed message, at most once every
+// WUNDG_INTERVAL_MS and only when a new transmission arrived since the last
+// upload. The HTTP call blocks loop() (and so rf.loop()), hence the short
+// timeouts in sendWeatherData().
+void sendWunderground() {
+  static uint32_t lastSendTick = 0;
+  static uint32_t lastSentRx = 0;
+  static bool sentOnce = false;
+
+  if (!WiFi.isConnected())
+    return;
+  if (sentOnce && xTaskGetTickCount() - lastSendTick < WUNDG_INTERVAL_MS)
+    return;
+
+  JsonDocument out;
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  bool fresh = data.id != 0 && data.last_rx != lastSentRx;
+  if (fresh) {
+    out = stateDocument;
+    lastSentRx = data.last_rx;
+  }
+  xSemaphoreGive(stateMutex);
+  if (!fresh)
+    return;
+
+  lastSendTick = xTaskGetTickCount();
+  sentOnce = true;
+  int code = sendWeatherData(out, CFG_WUNDG_STATIONID, CFG_WUNDG_PASSWORD);
+  if (code != 200)
+    Log.error(F("Wunderground upload failed: %d" CR), code);
+}
+#endif
 
 void InitDisplay(const char* Productname, const char* Version) {
   uint8_t buf[32];
@@ -775,6 +813,9 @@ void loop() {
   server.handleClient();
 
   publishLatest(false);
+#ifdef CFG_WUNDG_STATIONID
+  sendWunderground();
+#endif
 
   uint32_t ticks = xTaskGetTickCount();
   uint32_t age = ticks - data.last_rx;

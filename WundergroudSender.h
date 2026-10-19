@@ -104,8 +104,12 @@ static int sendWeatherData(const JsonDocument& jsonDoc,
     url += "&windgustmph=" + String(windGustMph, 1);
   }
 
-  // Rain: mm to inches
-  if (jsonDoc.containsKey("rain_mm_h")) {
+  // Rain: mm to inches. rainin is rain over the past 60 minutes, so prefer the
+  // rolling window over the clock-hour bucket.
+  if (jsonDoc.containsKey("rain_mm_60m")) {
+    float rainIn = jsonDoc["rain_mm_60m"].as<float>() / 25.4f;
+    url += "&rainin=" + String(rainIn, 2);
+  } else if (jsonDoc.containsKey("rain_mm_h")) {
     float rainIn = jsonDoc["rain_mm_h"].as<float>() / 25.4f;
     url += "&rainin=" + String(rainIn, 2);
   }
@@ -129,9 +133,14 @@ static int sendWeatherData(const JsonDocument& jsonDoc,
   // Finalize
   url += "&action=updateraw";
 
-  Log.notice(F("Wunderground: %s" CR), url.c_str());
+  // The log is served on /logs: never print the station key.
+  String logUrl = url;
+  logUrl.replace(String("&PASSWORD=") + stationPassword, "&PASSWORD=***");
+  Log.notice(F("Wunderground: %s" CR), logUrl.c_str());
 
   HTTPClient http;
+  http.setConnectTimeout(3000);
+  http.setTimeout(3000);
   http.begin(url);
   int code = http.GET();
   yield();

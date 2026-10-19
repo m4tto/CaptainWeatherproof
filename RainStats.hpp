@@ -162,6 +162,11 @@ struct RainStats {
     uint32_t lastHour   = 0;
     uint32_t lastDay    = 0;
 
+    // Rolling last-60-minutes window (Wunderground "rainin"): one bin per
+    // wall-clock minute, stamped with its minute so stale bins are skipped.
+    int32_t  binTips[60]   = {};
+    uint32_t binMinute[60] = {};
+
     static constexpr uint32_t MIN_VALID_EPOCH = 1704067200UL; // 2024-01-01
 
     void update(uint32_t id, float rainMm, uint32_t nowMs, uint32_t epoch) {
@@ -171,6 +176,24 @@ struct RainStats {
         minuteTips += delta;
         hourTips   += delta;
         dayTips    += delta;
+
+        if (epoch >= MIN_VALID_EPOCH) {
+            uint32_t m = epoch / 60;
+            uint8_t  i = m % 60;
+            if (binMinute[i] != m) { binMinute[i] = m; binTips[i] = 0; }
+            binTips[i] += delta;
+        }
+    }
+
+    int32_t last60MinTips(uint32_t epoch) const {
+        if (epoch < MIN_VALID_EPOCH)
+            return 0;
+        uint32_t m = epoch / 60;
+        int32_t sum = 0;
+        for (uint8_t i = 0; i < 60; i++)
+            if (binMinute[i] <= m && m - binMinute[i] < 60)
+                sum += binTips[i];
+        return sum;
     }
 
     // Resets the buckets whose period has elapsed.
@@ -186,6 +209,7 @@ struct RainStats {
     float minuteMm() const { return minuteTips * RAIN_MM_PER_TIP; }
     float hourMm()   const { return hourTips   * RAIN_MM_PER_TIP; }
     float dayMm()    const { return dayTips    * RAIN_MM_PER_TIP; }
+    float last60MinMm(uint32_t epoch) const { return last60MinTips(epoch) * RAIN_MM_PER_TIP; }
 };
 
 #endif // RAIN_STATS_HPP
