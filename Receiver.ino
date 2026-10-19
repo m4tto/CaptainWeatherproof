@@ -15,8 +15,9 @@
 #include "time.h"
 #include "LogPrinterBuffer.h"
 #include "SMA.hpp"
+#include "RainStats.hpp"
 
-#define FIRMWARE_VERSION "1.6"
+#define FIRMWARE_VERSION "1.7"
 
 #ifndef RF_MODULE_FREQUENCY
 #  define RF_MODULE_FREQUENCY 433.92
@@ -53,24 +54,6 @@ typedef struct {
   uint32_t last_rx;
 } DataSet_t;
 
-struct RainStats {
-  uint8_t initialized = 0;
-  float lastCounter = 0.0;
-  uint32_t lastTimestamp = 0;
-
-  float minuteRainAcc = 0.0;
-  float hourRainAcc = 0.0;
-  float dayRainAcc = 0.0;
-
-  float minuteRain = 0.0;
-  float hourRain = 0.0;
-  float dayRain = 0.0;
-
-  uint32_t lastMinute = 0;
-  uint32_t lastHour = 0;
-  uint32_t lastDay = 0;
-};
-
 char messageBuffer[JSON_MSG_BUFFER];
 
 rtl_433_ESP rf; // use -1 to disable transmitter
@@ -99,7 +82,14 @@ volatile DataSet_t data;
 
 WiFiClient net;
 PubSubClient mqtt(net);
-JsonDocument jsonDocument;
+// The rtl_433 callback runs in the library's decoder task, while MQTT, the web
+// server and the re-publish logic run in loop(). stateMutex guards everything
+// shared between them: data, rainStats, sma, smaLight, stateDocument and
+// statePending. MQTT is only ever touched from loop() (PubSubClient is not
+// thread safe).
+SemaphoreHandle_t stateMutex;
+JsonDocument stateDocument; // last processed message, ready to be published
+bool statePending = false;
 RainStats rainStats;
 WebServer server(80);
 String logBuffer;
@@ -343,82 +333,118 @@ const char* upload_form = R"rawliteral(
 
 
 
+// Runs in the rtl_433 decoder task.
 void rtl_433_Callback(char* message) {
- 
-  deserializeJson(jsonDocument, message);
-  logJson(jsonDocument);
+  JsonDocument jsondata;
+  if (deserializeJson(jsondata, message)) {
+    Log.error(F("Message discarded: invalid JSON" CR));
+    return;
+  }
+  Log.notice(F("Received message : %s" CR), message);
+  processMessage(jsondata);
 }
 
 // Sometimes the CRC is not enough and wrong data is passed through.
 // This funtion should lower the occurance of publishing wrong messages
-bool ConsistencyCheck(DataSet_t &d){
+bool ConsistencyCheck(const DataSet_t &d){
 
-  if(data.temperature < -40.0 || data.temperature > 60.0)
+  if(d.temperature < -40.0 || d.temperature > 60.0)
     return false;
 
-  if(data.humidity < 0.0 || data.humidity > 100.0)
+  if(d.humidity < 0.0 || d.humidity > 100.0)
     return false;
 
-  if(data.light_lux < 0 || data.light_lux > 200000)
+  if(d.light_lux < 0 || d.light_lux > 200000)
     return false;
 
-  if(data.uv < 0 || data.uv > 16)
+  if(d.uv < 0 || d.uv > 16)
     return false;
-  
-  if(data.rssi > 0 || data.rssi < -120)
+
+  if(d.rssi > 0 || d.rssi < -120)
     return false;
 
   return true;
 }
 
-void logJson(JsonDocument jsondata) {
-  char JSONmessageBuffer[measureJson(jsondata) + 1];
-  serializeJson(jsondata, JSONmessageBuffer, measureJson(jsondata) + 1);
+void processMessage(JsonDocument &jsondata) {
+  DataSet_t d = {};
+  d.id = jsondata["id"];
+  // d.battery = jsondata["battery_ok"];
+  d.temperature = jsondata["temperature_C"];
+  d.humidity = jsondata["humidity"];
+  d.wind_avg_km_h = jsondata["wind_avg_km_h"];
 
-  data.id = jsondata["id"];
-  // data.battery = jsondata["battery_ok"];
-  data.temperature = jsondata["temperature_C"];
-  data.humidity = jsondata["humidity"];
-  data.wind_avg_km_h = jsondata["wind_avg_km_h"];
+  d.wind_max_km_h = jsondata["wind_max_km_h"];
+  d.wind_dir_deg = jsondata["wind_dir_deg"];
+  d.rain_mm = jsondata["rain_mm"];
 
-  data.wind_max_km_h = jsondata["wind_max_km_h"];
-  data.wind_dir_deg = jsondata["wind_dir_deg"];
-  data.rain_mm = jsondata["rain_mm"];
+  d.uv = jsondata["uv"];
 
-  data.uv = jsondata["uv"];
+  d.light_lux = jsondata["light_lux"];
+  d.rssi = jsondata["rssi"];
 
-  data.light_lux = jsondata["light_lux"];
-  data.rssi = jsondata["rssi"];
+  d.last_rx = xTaskGetTickCount();
 
-  data.last_rx = xTaskGetTickCount();
-  if (ConsistencyCheck((DataSet_t&)data)) {
-    uint32_t now = time(nullptr); // assumes NTP is synced
-
-    if (data.id != 0) {
-      if (rainStats.initialized == 0) {
-        rainStats.lastCounter = data.rain_mm;
-        rainStats.lastTimestamp = now;
-        rainStats.initialized = 1;
-      }
-      UpdateRainStats(rainStats, now, data.rain_mm);
-    }
-
-    sma->update(data.wind_dir_deg);
-    smaLight->update(data.light_lux);
-
-    jsondata["msg_age"] = 0;
-
-    jsondata["rain_mm_m"] = rainStats.minuteRain;
-    jsondata["rain_mm_h"] = rainStats.hourRain;
-    jsondata["rain_mm_d"] = rainStats.dayRain;
-
-    jsondata["wind_dir_deg_avg"] = sma->get();
-
-    Log.notice(F("Received message : %s" CR), JSONmessageBuffer);
-
-    publishState(mqtt, state_topic, jsondata);
-  } else
+  if (!ConsistencyCheck(d)) {
     Log.error(F("Message discarded for inconsistencies" CR));
+    return;
+  }
+
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+
+  if (d.id != 0) {
+    uint32_t rebasesBefore = rainStats.filter.rebaseEvents();
+    rainStats.update(d.id, d.rain_mm, millis(), time(nullptr));
+    if (rainStats.filter.rebaseEvents() != rebasesBefore)
+      Log.warning(F("Rain counter re-baselined to %F mm" CR), rainStats.filter.acceptedMm());
+  }
+
+  // Only the validated counter is exposed. Until it is known, the key is left
+  // out so Home Assistant keeps its previous value (a temporary 0 would be
+  // seen by total_increasing as a meter reset and turn into a spike).
+  if (rainStats.filter.initialized()) {
+    d.rain_mm = rainStats.filter.acceptedMm();
+    jsondata["rain_mm"] = d.rain_mm;
+  } else {
+    jsondata.remove("rain_mm");
+  }
+
+  memcpy((void*)&data, &d, sizeof(DataSet_t));
+
+  sma->update(d.wind_dir_deg);
+  smaLight->update(d.light_lux);
+
+  jsondata["msg_age"] = 0;
+
+  jsondata["rain_mm_m"] = rainStats.minuteMm();
+  jsondata["rain_mm_h"] = rainStats.hourMm();
+  jsondata["rain_mm_d"] = rainStats.dayMm();
+
+  jsondata["wind_dir_deg_avg"] = sma->get();
+
+  stateDocument = jsondata;
+  statePending = true;
+
+  xSemaphoreGive(stateMutex);
+}
+
+// Runs in loop(): publishes the latest processed message, or re-publishes the
+// last one with an updated msg_age when resend is true.
+void publishLatest(bool resend) {
+  JsonDocument out;
+
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  if (!statePending && !resend) {
+    xSemaphoreGive(stateMutex);
+    return;
+  }
+  if (resend)
+    stateDocument["msg_age"] = (xTaskGetTickCount() - data.last_rx) / 1000;
+  statePending = false;
+  out = stateDocument;
+  xSemaphoreGive(stateMutex);
+
+  publishState(mqtt, state_topic, out);
 }
 
 void InitDisplay(const char* Productname, const char* Version) {
@@ -583,48 +609,6 @@ void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info){
 //   NetworkStartup();
 // }
 
-void UpdateRainStats(RainStats &stats, uint32_t timestamp, float counter) {
-  
-  // Compute delta rainfall
-  float delta = counter >= stats.lastCounter ? counter - stats.lastCounter : counter;
-
-  // Extract time components
-  uint32_t currentMinute = timestamp / 60;
-  uint32_t currentHour = timestamp / 3600;
-  uint32_t currentDay = timestamp / 86400;
-
-  // Reset intervals if time advanced
-  if (currentMinute != stats.lastMinute) {
-    //stats.minuteRain = stats.minuteRainAcc;
-    stats.minuteRain = 0.0;
-    stats.lastMinute = currentMinute;
-  }
-  if (currentHour != stats.lastHour) {
-    ///stats.hourRain = stats.hourRainAcc;
-    stats.hourRain = 0.0;
-    stats.lastHour = currentHour;
-  }
-  if (currentDay != stats.lastDay) {
-    //stats.dayRain = stats.dayRainAcc;
-    stats.dayRain = 0.0;
-    stats.lastDay = currentDay;
-  }
-
-  // Accumulate rain in current intervals
-  //stats.minuteRainAcc += delta;
-  //stats.hourRainAcc += delta;
-  //stats.dayRainAcc += delta;
-
-  stats.minuteRain += delta;
-  stats.hourRain += delta;
-  stats.dayRain += delta;
-
-  // Store last values
-  stats.lastCounter = counter;
-  stats.lastTimestamp = timestamp;
-}
-
-
 void handleRoot() {
   server.send(200, "text/html", upload_form);
 }
@@ -664,6 +648,7 @@ void handleLogs() {
 
 void handleData() {
   JsonDocument jsonDoc;
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
   jsonDoc["id"] = data.id;
   jsonDoc["temperature"] = data.temperature;
   jsonDoc["humidity"] = data.humidity;
@@ -682,11 +667,12 @@ void handleData() {
   strftime(formattedDate, sizeof(formattedDate), "%Y-%m-%d %H:%M:%S", timeinfo);
 
   jsonDoc["current_date"] = formattedDate;
-  jsonDoc["rain_mm_m"] = rainStats.minuteRain;
-  jsonDoc["rain_mm_h"] = rainStats.hourRain;
-  jsonDoc["rain_mm_d"] = rainStats.dayRain;
+  jsonDoc["rain_mm_m"] = rainStats.minuteMm();
+  jsonDoc["rain_mm_h"] = rainStats.hourMm();
+  jsonDoc["rain_mm_d"] = rainStats.dayMm();
   jsonDoc["wind_dir_deg_avg"] = sma->get();
   jsonDoc["light_lux_avg"] = smaLight->get();
+  xSemaphoreGive(stateMutex);
   jsonDoc["wifi_status"] = WiFi.isConnected() ? "Connected" : "Disconnected";
   jsonDoc["ip_address"] = WiFi.isConnected() ? WiFi.localIP().toString() : "N/A";
   jsonDoc["mqtt_status"] = mqtt.connected() ? "Connected" : "Disconnected";
@@ -732,6 +718,7 @@ void setup() {
   LOG_LEVEL_SILENT
 #endif
 
+  stateMutex = xSemaphoreCreateMutex();
   sma = new SimpleMovingAverage(15);
   smaLight = new SimpleMovingAverage(3); // 3 samples for 1-minute average
 
@@ -787,29 +774,21 @@ void loop() {
 
   server.handleClient();
 
+  publishLatest(false);
 
-  // now = time(nullptr); // assumes NTP is synced
-
-  // if(data.id != 0){
-
-  //   if(rainStats.initialized == 0){
-  //     rainStats.lastCounter = data.rain_mm;
-  //     rainStats.lastTimestamp = now;
-  //     rainStats.initialized = 1;
-  //   }
-  //   UpdateRainStats(rainStats, now, data.rain_mm);
-    
-  // }
+  uint32_t ticks = xTaskGetTickCount();
+  uint32_t age = ticks - data.last_rx;
 
   // Restart the board if we cannot receive any message for more than 1 minute
-  if(data.id != 0 && (xTaskGetTickCount() - data.last_rx) > 60000){
+  if(data.id != 0 && age > 60000){
     Log.error(F("Restarting after timeout" CR));
     ESP.restart();
   }
 
   // The station publish the data every 20s. If we miss a transmission, the last message is sent again with updated msg_age every 10s.
-  if(data.id != 0 && (xTaskGetTickCount() - data.last_rx) > 23000 && (xTaskGetTickCount() - data.last_rx) % 10000 == 0){
-    jsonDocument["msg_age"] = (xTaskGetTickCount() - data.last_rx) / 1000;
-    logJson(jsonDocument);
+  static uint32_t lastResend = 0;
+  if(data.id != 0 && age > 23000 && ticks - lastResend >= 10000){
+    lastResend = ticks;
+    publishLatest(true);
   }
 }
